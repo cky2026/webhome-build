@@ -1,6 +1,7 @@
 package com.github.catvod.spider;
 
-import java.util.HashMap;
+import android.content.Context;
+
 import java.util.Map;
 
 public class Proxy {

@@ -5,7 +5,7 @@ import android.app.Application;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.graphics.drawable.ColorDrawable;
+import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -14,26 +14,33 @@ import android.os.Looper;
 import android.view.KeyEvent;
 import android.view.Window;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
+import android.widget.Toast;
 
 import com.github.catvod.crawler.Spider;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
 public class WebHome extends Spider {
 
     private static final int MAX_RETRIES = 18;
-    private static volatile Context appContext;
     private static volatile boolean lifecycleInstalled;
     private static volatile Overlay overlay;
     private static volatile WeakReference<Activity> foreground = new WeakReference<>(null);
@@ -46,8 +53,7 @@ public class WebHome extends Spider {
     public void init(Context context, String extend) {
         if (context != null) {
             Context app = context.getApplicationContext();
-            appContext = app != null ? app : context;
-            installLifecycleTracker(appContext);
+            if (app != null) installLifecycleTracker(app);
         }
         this.extend = extend == null ? "" : extend.trim();
     }
@@ -81,7 +87,19 @@ public class WebHome extends Spider {
 
     @Override
     public String playerContent(String flag, String id, List<String> vipFlags) {
-        return "{\"parse\":0,\"playUrl\":\"\",\"url\":\"\",\"jx\":\"\"}";
+        try {
+            String url = id == null ? "" : id;
+            int i = url.indexOf("@@");
+            if (i > 0) url = url.substring(0, i);
+            JSONObject r = new JSONObject();
+            r.put("parse", 0);
+            r.put("playUrl", "");
+            r.put("url", url);
+            r.put("jx", "");
+            return r.toString();
+        } catch (Throwable e) {
+            return "{\"parse\":0,\"url\":\"\"}";
+        }
     }
 
     @Override
@@ -89,42 +107,20 @@ public class WebHome extends Spider {
         close();
     }
 
-    // ---------- 生命周期追踪 ----------
+    // ================= 生命周期追踪 =================
 
     private static void installLifecycleTracker(Context context) {
         if (lifecycleInstalled || !(context instanceof Application)) return;
         synchronized (LOCK) {
             if (lifecycleInstalled) return;
             ((Application) context).registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
-                @Override
-                public void onActivityCreated(Activity a, Bundle b) {
-                    remember(a);
-                }
-
-                @Override
-                public void onActivityStarted(Activity a) {
-                    remember(a);
-                }
-
-                @Override
-                public void onActivityResumed(Activity a) {
-                    remember(a);
-                }
-
-                @Override
-                public void onActivityPaused(Activity a) {
-                }
-
-                @Override
-                public void onActivityStopped(Activity a) {
-                }
-
-                @Override
-                public void onActivitySaveInstanceState(Activity a, Bundle b) {
-                }
-
-                @Override
-                public void onActivityDestroyed(Activity a) {
+                @Override public void onActivityCreated(Activity a, Bundle b) { remember(a); }
+                @Override public void onActivityStarted(Activity a) { remember(a); }
+                @Override public void onActivityResumed(Activity a) { remember(a); }
+                @Override public void onActivityPaused(Activity a) { }
+                @Override public void onActivityStopped(Activity a) { }
+                @Override public void onActivitySaveInstanceState(Activity a, Bundle b) { }
+                @Override public void onActivityDestroyed(Activity a) {
                     if (foreground.get() == a) foreground = new WeakReference<>(null);
                 }
             });
@@ -132,8 +128,8 @@ public class WebHome extends Spider {
         }
     }
 
-    private static void remember(Activity activity) {
-        if (usable(activity)) foreground = new WeakReference<>(activity);
+    private static void remember(Activity a) {
+        if (usable(a)) foreground = new WeakReference<>(a);
     }
 
     private static boolean usable(Activity a) {
@@ -143,33 +139,30 @@ public class WebHome extends Spider {
     private static Activity activity() {
         Activity a = foreground.get();
         if (usable(a)) return a;
-        return findActivityReflectively();
-    }
-
-    private static Activity findActivityReflectively() {
         try {
             Class<?> at = Class.forName("android.app.ActivityThread");
             Object thread = at.getMethod("currentActivityThread").invoke(null);
             Field f = at.getDeclaredField("mActivities");
             f.setAccessible(true);
             Object obj = f.get(thread);
-            if (!(obj instanceof Map)) return null;
-            for (Object r : ((Map<?, ?>) obj).values()) {
-                if (r == null) continue;
-                Field paused = r.getClass().getDeclaredField("paused");
-                paused.setAccessible(true);
-                if (Boolean.TRUE.equals(paused.get(r))) continue;
-                Field af = r.getClass().getDeclaredField("activity");
-                af.setAccessible(true);
-                Object a = af.get(r);
-                if (a instanceof Activity && usable((Activity) a)) return (Activity) a;
+            if (obj instanceof Map) {
+                for (Object r : ((Map<?, ?>) obj).values()) {
+                    if (r == null) continue;
+                    Field pf = r.getClass().getDeclaredField("paused");
+                    pf.setAccessible(true);
+                    if (Boolean.TRUE.equals(pf.get(r))) continue;
+                    Field af = r.getClass().getDeclaredField("activity");
+                    af.setAccessible(true);
+                    Object act = af.get(r);
+                    if (act instanceof Activity && usable((Activity) act)) return (Activity) act;
+                }
             }
         } catch (Throwable ignored) {
         }
         return null;
     }
 
-    // ---------- 打开 / 关闭网页（带重试） ----------
+    // ================= 打开 / 关闭 =================
 
     private static void open(final String url, final int retry) {
         MAIN.post(new Runnable() {
@@ -180,9 +173,7 @@ public class WebHome extends Spider {
                     if (retry < MAX_RETRIES) {
                         MAIN.postDelayed(new Runnable() {
                             @Override
-                            public void run() {
-                                open(url, retry + 1);
-                            }
+                            public void run() { open(url, retry + 1); }
                         }, 180L);
                     }
                     return;
@@ -215,13 +206,224 @@ public class WebHome extends Spider {
         return s;
     }
 
-    // ---------- 内置 WebView 全屏弹窗 ----------
+    // ================= 原生桥：跨域 HTTP + FM SDK =================
+
+    public static class NativeBridge {
+
+        private final Activity host;
+
+        NativeBridge(Activity host) {
+            this.host = host;
+        }
+
+        // ---- 同步跨域请求，返回 "状态码\x01Base64响应体" ----
+        @JavascriptInterface
+        public String http(String url, String method, String headersJson, String body) {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(30000);
+                String m = (method == null || method.length() == 0) ? "GET" : method.toUpperCase();
+                conn.setRequestMethod(m);
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36");
+                conn.setRequestProperty("Accept", "*/*");
+                try {
+                    JSONObject hs = new JSONObject(headersJson == null ? "{}" : headersJson);
+                    Iterator<String> it = hs.keys();
+                    while (it.hasNext()) {
+                        String k = it.next();
+                        if ("host".equalsIgnoreCase(k) || "content-length".equalsIgnoreCase(k)) continue;
+                        conn.setRequestProperty(k, hs.optString(k));
+                    }
+                } catch (Throwable ignored) {
+                }
+                if (body != null && body.length() > 0 && !"GET".equals(m) && !"HEAD".equals(m)) {
+                    conn.setDoOutput(true);
+                    OutputStream os = conn.getOutputStream();
+                    os.write(body.getBytes("UTF-8"));
+                    os.flush();
+                    os.close();
+                }
+                int code = conn.getResponseCode();
+                InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                if (in != null) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+                    in.close();
+                }
+                return code + "\u0001" + android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP);
+            } catch (Throwable t) {
+                return "0\u0001" + android.util.Base64.encodeToString(
+                        ("{\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}").getBytes(),
+                        android.util.Base64.NO_WRAP);
+            } finally {
+                if (conn != null) try { conn.disconnect(); } catch (Throwable ignored) { }
+            }
+        }
+
+        // ---- FM SDK: window.fm.get / fm.post / fm.fetch ----
+        @JavascriptInterface
+        public String fmRequest(String url, String method, String headersJson, String body) {
+            return http(url, method, headersJson, body);
+        }
+
+        // ---- FM SDK: window.fm.play(url, name) ----
+        @JavascriptInterface
+        public void fmPlay(final String url, final String name) {
+            MAIN.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Intent it = new Intent(Intent.ACTION_VIEW);
+                        it.setDataAndType(Uri.parse(url), "video/*");
+                        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        host.startActivity(it);
+                    } catch (Throwable t) {
+                        try {
+                            Toast.makeText(host, "播放失败: " + url, Toast.LENGTH_SHORT).show();
+                        } catch (Throwable ignored) { }
+                    }
+                }
+            });
+        }
+
+        // ---- FM SDK: window.fm.toast(msg) ----
+        @JavascriptInterface
+        public void fmToast(final String msg) {
+            MAIN.post(new Runnable() {
+                @Override
+                public void run() {
+                    try { Toast.makeText(host, msg, Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) { }
+                }
+            });
+        }
+
+        // ---- FM SDK: window.fm.close() ----
+        @JavascriptInterface
+        public void fmClose() {
+            MAIN.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (overlay != null) overlay.dismiss();
+                }
+            });
+        }
+
+        // 兼容原版 fongmiBridge 命名
+        @JavascriptInterface
+        public String fetch(String url, String method, String headersJson, String body) {
+            return http(url, method, headersJson, body);
+        }
+
+        @JavascriptInterface
+        public void play(String url, String name) {
+            fmPlay(url, name);
+        }
+
+        @JavascriptInterface
+        public void toast(String msg) {
+            fmToast(msg);
+        }
+
+        @JavascriptInterface
+        public void close() {
+            fmClose();
+        }
+
+        @JavascriptInterface
+        public String version() {
+            return "fm-shim-1.0";
+        }
+    }
+
+    // ================= 注入 JS：window.fm 兼容层 + fetch/XHR 跨域劫持 =================
+
+    private static final String INJECT_JS =
+            "javascript:(function(){" +
+            "if(window.__fmShim) return; window.__fmShim=true;" +
+            "var B=window.fongmiBridge; if(!B) return;" +
+
+            // 解析 http() 返回："code\u0001base64"
+            "function parse(raw){" +
+            "  var i=raw.indexOf('\\u0001');" +
+            "  var code=parseInt(raw.substring(0,i))||0;" +
+            "  var b64=raw.substring(i+1);" +
+            "  var bin=atob(b64);var bytes=new Uint8Array(bin.length);" +
+            "  for(var j=0;j<bin.length;j++)bytes[j]=bin.charCodeAt(j);" +
+            "  var text=null;try{text=new TextDecoder('utf-8').decode(bytes);}catch(e){text=bin;}" +
+            "  return {status:code,bytes:bytes,text:text,json:function(){try{return JSON.parse(text)}catch(e){return null}}};" +
+            "}" +
+
+            // window.fm —— FM SDK 兼容层
+            "var fm={" +
+            "  version:function(){return B.version();}," +
+            "  fetch:function(url,opt){" +
+            "    opt=opt||{};" +
+            "    var method=(opt.method||'GET').toUpperCase();" +
+            "    var headers={};var h=opt.headers||{};" +
+            "    if(h instanceof Headers){h.forEach(function(v,k){headers[k]=v;});}else{for(var k in h)headers[k]=h[k];}" +
+            "    var body=opt.body?(typeof opt.body==='string'?opt.body:JSON.stringify(opt.body)):'';" +
+            "    return Promise.resolve(parse(B.http(url,method,JSON.stringify(headers),body)));" +
+            "  }," +
+            "  get:function(url,headers){return fm.fetch(url,{method:'GET',headers:headers});}," +
+            "  post:function(url,body,headers){" +
+            "    headers=headers||{};" +
+            "    if(body&&typeof body!=='string'){headers['Content-Type']=headers['Content-Type']||'application/json';body=JSON.stringify(body);}" +
+            "    return fm.fetch(url,{method:'POST',headers:headers,body:body});" +
+            "  }," +
+            "  play:function(url,name){B.fmPlay(url,name||'');}," +
+            "  toast:function(msg){B.fmToast(String(msg==null?'':msg));}," +
+            "  close:function(){B.fmClose();}" +
+            "};" +
+            "window.fm=fm; if(!window.FM) window.FM=fm;" +
+
+            // 跨域劫持 fetch
+            "var OF=window.fetch;" +
+            "window.fetch=function(input,init){" +
+            "  try{" +
+            "    var url=(typeof input==='string')?input:(input&&input.url)||'';" +
+            "    if(!/^https?:/i.test(url)) return OF.apply(this,arguments);" +
+            "    return fm.fetch(url,init||{}).then(function(r){return new Response(r.text,{status:r.status||200});});" +
+            "  }catch(e){return OF.apply(this,arguments);}" +
+            "};" +
+
+            // 跨域劫持 XMLHttpRequest
+            "var OOpen=XMLHttpRequest.prototype.open;" +
+            "var OSend=XMLHttpRequest.prototype.send;" +
+            "XMLHttpRequest.prototype.open=function(m,u){this.__url=u;this.__method=m;return OOpen.apply(this,arguments);};" +
+            "XMLHttpRequest.prototype.send=function(body){" +
+            "  var self=this;" +
+            "  var u=self.__url||'';" +
+            "  if(/^https?:/i.test(u)){" +
+            "    var headers={};" +
+            "    try{headers['Content-Type']=self.getRequestHeader?(''+self.getRequestHeader('Content-Type')||''):'';}catch(e){}" +
+            "    var r=parse(B.http(u,self.__method||'GET',JSON.stringify(headers),body?String(body):''));" +
+            "    setTimeout(function(){" +
+            "      Object.defineProperty(self,'status',{value:r.status||200,writable:false});" +
+            "      Object.defineProperty(self,'responseText',{value:r.text,writable:false});" +
+            "      Object.defineProperty(self,'response',{value:r.text,writable:false});" +
+            "      if(typeof self.onreadystatechange==='function')self.onreadystatechange();" +
+            "      if(typeof self.onload==='function')self.onload();" +
+            "      self.dispatchEvent(new Event('readystatechange'));" +
+            "      self.dispatchEvent(new Event('load'));" +
+            "    },0);" +
+            "    return;" +
+            "  }" +
+            "  return OSend.apply(this,arguments);" +
+            "};" +
+            "})();";
+
+    // ================= WebView 弹窗 =================
 
     private static final class Overlay extends Dialog {
 
         private final Activity host;
         private final String source;
         private WebView web;
+        private NativeBridge bridge;
 
         Overlay(Activity activity, String url) {
             super(activity, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
@@ -240,16 +442,11 @@ public class WebHome extends Spider {
             setContentView(root);
             Window w = getWindow();
             if (w != null) {
-                w.setBackgroundDrawable(new ColorDrawable(0xFF000000));
+                w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0xFF000000));
                 w.setLayout(-1, -1);
                 hideSystemBars(w);
             }
             setupWebView(web);
-            try {
-                web.loadUrl(source);
-            } catch (Throwable t) {
-                web.loadDataWithBaseURL(null, message("加载失败", String.valueOf(t.getMessage())), "text/html", "UTF-8", null);
-            }
             setOnKeyListener(new DialogInterface.OnKeyListener() {
                 @Override
                 public boolean onKey(DialogInterface d, int keyCode, KeyEvent event) {
@@ -261,12 +458,11 @@ public class WebHome extends Spider {
                     return false;
                 }
             });
-        }
-
-        @Override
-        public void onBackPressed() {
-            if (web != null && web.canGoBack()) web.goBack();
-            else dismiss();
+            try {
+                web.loadUrl(source);
+            } catch (Throwable t) {
+                web.loadDataWithBaseURL(null, "<h1>加载失败</h1><small>" + t.getMessage() + "</small>", "text/html", "UTF-8", null);
+            }
         }
 
         private void setupWebView(WebView v) {
@@ -279,17 +475,12 @@ public class WebHome extends Spider {
             s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
             s.setUseWideViewPort(true);
             s.setLoadWithOverviewMode(true);
-            s.setSupportZoom(false);
-            s.setBuiltInZoomControls(false);
-            s.setTextZoom(100);
             s.setCacheMode(-1);
             s.setAllowFileAccess(true);
-            s.setAllowContentAccess(true);
             s.setAllowFileAccessFromFileURLs(true);
             s.setAllowUniversalAccessFromFileURLs(true);
             if (Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
             v.setBackgroundColor(0xFF000000);
-            v.setOverScrollMode(android.view.View.OVER_SCROLL_NEVER);
             v.setFocusable(true);
             v.setFocusableInTouchMode(true);
             try {
@@ -298,6 +489,10 @@ public class WebHome extends Spider {
                 cm.setAcceptThirdPartyCookies(v, true);
             } catch (Throwable ignored) {
             }
+
+            bridge = new NativeBridge(host);
+            v.addJavascriptInterface(bridge, "fongmiBridge");
+
             v.setWebChromeClient(new WebChromeClient());
             v.setWebViewClient(new WebViewClient() {
                 @Override
@@ -313,20 +508,15 @@ public class WebHome extends Spider {
 
                 @Override
                 public void onPageFinished(WebView view, String url) {
-                    try {
-                        CookieManager.getInstance().flush();
-                    } catch (Throwable ignored) {
-                    }
+                    view.evaluateJavascript(INJECT_JS, null);
+                    try { CookieManager.getInstance().flush(); } catch (Throwable ignored) { }
                 }
             });
         }
 
         @Override
         public void dismiss() {
-            try {
-                CookieManager.getInstance().flush();
-            } catch (Throwable ignored) {
-            }
+            try { CookieManager.getInstance().flush(); } catch (Throwable ignored) { }
             if (web != null) {
                 try {
                     web.stopLoading();
@@ -351,17 +541,6 @@ public class WebHome extends Spider {
         public void onWindowFocusChanged(boolean hasFocus) {
             super.onWindowFocusChanged(hasFocus);
             if (hasFocus) hideSystemBars(getWindow());
-        }
-
-        private String message(String title, String detail) {
-            return "<!doctype html><html><head><meta charset=\"utf-8\">"
-                    + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-                    + "<style>body{margin:0;padding:28px;background:#050505;color:#fff;font:16px sans-serif}small{opacity:.65;word-break:break-all}</style></head>"
-                    + "<body><h1>" + esc(title) + "</h1><small>" + esc(detail) + "</small></body></html>";
-        }
-
-        private String esc(String s) {
-            return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
         }
     }
 }

@@ -56,13 +56,10 @@ public class WebHomeNativeBridge {
     private void launchVideo(final JSONObject vod, final Activity activity) {
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
 
-        Class<?> videoCls = null;
+        final Class<?> videoCls;
         try {
             videoCls = Class.forName("com.fongmi.android.tv.ui.activity.VideoActivity");
         } catch (Throwable ignored) {
-        }
-
-        if (videoCls == null) {
             toast(activity, "已收到视频，请关闭网页，在壳的「网页点播」分类中查看播放");
             return;
         }

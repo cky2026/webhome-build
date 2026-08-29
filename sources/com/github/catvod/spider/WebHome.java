@@ -14,8 +14,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.KeyEvent;
-import android.view.View;
-import android.view.ViewGroup;
 import android.view.Window;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -578,7 +576,7 @@ public class WebHome extends Spider {
             if (web != null) {
                 try {
                     web.stopLoading();
-                    web.loadUrl("about:bean:00");
+                    web.loadUrl("about:blank");
                     web.clearHistory();
                     web.removeAllViews();
                     web.destroy();
@@ -595,7 +593,7 @@ public class WebHome extends Spider {
             w.getDecorView().setSystemUiVisibility(5894);
         }
 
-        @Overlay.annotations
+        @Override
         public void onWindowFocusChanged(boolean hasFocus) {
             super.onWindowFocusChanged(hasFocus);
             if (hasFocus) hideSystemBars(getWindow());

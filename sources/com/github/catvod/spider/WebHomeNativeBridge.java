@@ -16,9 +16,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.HashMap;
 import java.util.Iterator;
-import java.util.Map;
 
 public class WebHomeNativeBridge {
 
@@ -48,7 +46,7 @@ public class WebHomeNativeBridge {
             "  get:function(url,headers){return fm.fetch(url,{method:'GET',headers:headers});}," +
             "  post:function(url,body,headers){" +
             "    headers=headers||{};" +
-            "    if(body&&typeof body!=='string'){headers['持-Type']=headers['Content-Type']||'application/json';body=JSON.stringify(body);}" +
+            "    if(body&&typeof body!=='string'){headers['Content-Type']=headers['Content-Type']||'application/json';body=JSON.stringify(body);}" +
             "    return fm.fetch(url,{method:'POST',headers:headers,body:body});" +
             "  }," +
             "  search:function(key){return B.search(key);};" +
@@ -69,16 +67,16 @@ public class WebHomeNativeBridge {
             "  }catch(e){return OF.apply(this,arguments);}" +
             "};" +
             "var OOpen=XMLHttpRequest.prototype.open;" +
-            "   var OSend=XMLHttpRequest.prototype.send;" +
-            "   XMLHttpRequest.prototype.open=function(m,u){this.__url=u;this.__method=m;return OOpen.apply(this,arguments);};" +
-            "   XMLHttpRequest.prototype.send=function(body){" +
-            "     var self=this;" +
-            "   var u=self.__url||'';" +
-            "   if(/^https?:/i.test(u)){" +
-            "      var headers={};" +
-            "     var r=parse(B.http(u,self.__method||'GET',JSON.stringify(headers),body?String(body):''));" +
-            "      setTimeout(function(){" +
-            "       Object.defineProperty(self,'status',{value:r.status||200,writable:false});" +
+            "var OSend=XMLHttpRequest.prototype.send;" +
+            "XMLHttpRequest.prototype.open=function(m,u){this.__url=u;this.__method=m;return OOpen.apply(this,arguments);};" +
+            "XMLHttpRequest.prototype.send=function(body){" +
+            "  var self=this;" +
+            "  var u=self.__url||'';" +
+            "  if(/^https?:/i.test(u)){" +
+            "    var headers={};" +
+            "    var r=parse(B.http(u,self.__method||'GET',JSON.stringify(headers),body?String(body):''));" +
+            "    setTimeout(function(){" +
+            "      Object.defineProperty(self,'status',{value:r.status||200,writable:false});" +
             "      Object.defineProperty(self,'responseText',{value:r.text,writable:false});" +
             "      Object.defineProperty(self,'response',{value:r.text,writable:false});" +
             "      if(typeof self.onreadystatechange==='function')self.onreadystatechange();" +
@@ -86,10 +84,10 @@ public class WebHomeNativeBridge {
             "      self.dispatchEvent(new Event('readystatechange'));" +
             "      self.dispatchEvent(new Event('load'));" +
             "    },0);" +
-            "     return;" +
-            "   }" +
-            "    return OSend.apply(this,arguments);" +
-            "  };" +
+            "    return;" +
+            "  }" +
+            "  return OSend.apply(this,arguments);" +
+            "};" +
             "})();";
 
     private final Activity host;
@@ -106,7 +104,6 @@ public class WebHomeNativeBridge {
         return INJECT_JS;
     }
 
-    // --- HTTP (跨域核心) ---
     @JavascriptInterface
     public String http(String url, String method, String headersJson, String body) {
         HttpURLConnection conn = null;
@@ -154,8 +151,6 @@ public class WebHomeNativeBridge {
         }
     }
 
-    // --- FM SDK Methods ---
-
     @JavascriptInterface
     public String fetch(String url, String method, String headersJson, String body) {
         return http(url, method, headersJson, body);
@@ -167,21 +162,10 @@ public class WebHomeNativeBridge {
             @Override
             public void run() {
                 try {
-                    // 尝试反射调用壳的播放器
-                    try {
-                        // 此处实现逻辑：尝试将URL传回壳的播放流程
-                        // 由于不同壳反射方式不同，这里使用通用 Intent 兜底
-                        Intent it = new Intent(Intent.ACTION_VIEW);
-                        it.setDataAndType(Uri.parse(url), "video/*");
-                        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        host.startActivity(it);
-                    } catch (Throwable e) {
-                        // 兜底：系统播放器
-                        Intent it = new Intent(Intent.ACTION_VIEW);
-                        it.setDataAndType(Uri.parse(url), "video/*");
-                        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        host.startActivity(it);
-                    }
+                    Intent it = new Intent(Intent.ACTION_VIEW);
+                    it.setDataAndType(Uri.parse(url), "video/*");
+                    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    host.startActivity(it);
                 } catch (Throwable t) {
                     try { Toast.makeText(host, "播放失败: " + t.getMessage(), Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) { }
                 }
@@ -204,10 +188,7 @@ public class WebHomeNativeBridge {
         (new Handler(Looper.getMainLooper())).post(new Runnable() {
             @Override
             public void run() {
-                // 关闭当前 WebView 对话框
-                // 注意：这里无法直接访问 Overlay 实例，需要通过 WebHome 类的静态方法
                 try {
-                    // 通过反射调用 WebHome.close() 或通过接口通知
                     Class<?> cls = Class.forName("com.github.catvod.spider.WebHome");
                     cls.getMethod("close").invoke(null);
                 } catch (Throwable e) {
@@ -224,7 +205,6 @@ public class WebHomeNativeBridge {
 
     @JavascriptInterface
     public String search(String key) {
-        // JAR 无法直接查询壳的数据库，返回空或调用 HTTP API
         return "";
     }
 

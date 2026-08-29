@@ -5,7 +5,6 @@ import android.app.Application;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.graphics.Bitmap;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
@@ -27,8 +26,8 @@ import com.github.catvod.crawler.Spider;
 import java.io.File;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
+import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 public class WebHome extends Spider {
@@ -65,7 +64,7 @@ public class WebHome extends Spider {
     }
 
     @Override
-    public String categoryContent(String tid, String pg, boolean filter, Map<String, String> ext) {
+    public String categoryContent(String tid, String pg, boolean filter, HashMap<String, String> ext) {
         return "{\"class\":[],\"list\":[]}";
     }
 
@@ -90,20 +89,42 @@ public class WebHome extends Spider {
         close();
     }
 
-    // ---------- 生命周期追踪（来自参考资料） ----------
+    // ---------- 生命周期追踪 ----------
 
     private static void installLifecycleTracker(Context context) {
         if (lifecycleInstalled || !(context instanceof Application)) return;
         synchronized (LOCK) {
             if (lifecycleInstalled) return;
             ((Application) context).registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
-                @Override public void onActivityCreated(Activity a, Bundle b) { remember(a); }
-                @Override public void onActivityStarted(Activity a) { remember(a); }
-                @Override public void onActivityResumed(Activity a) { remember(a); }
-                @Override public void onActivityPaused(Activity a) { }
-                @Override public void onActivityStopped(Activity a) { }
-                @Override public void onActivitySaveInstanceState(Activity a, Bundle b) { }
-                @Override public void onActivityDestroyed(Activity a) {
+                @Override
+                public void onActivityCreated(Activity a, Bundle b) {
+                    remember(a);
+                }
+
+                @Override
+                public void onActivityStarted(Activity a) {
+                    remember(a);
+                }
+
+                @Override
+                public void onActivityResumed(Activity a) {
+                    remember(a);
+                }
+
+                @Override
+                public void onActivityPaused(Activity a) {
+                }
+
+                @Override
+                public void onActivityStopped(Activity a) {
+                }
+
+                @Override
+                public void onActivitySaveInstanceState(Activity a, Bundle b) {
+                }
+
+                @Override
+                public void onActivityDestroyed(Activity a) {
                     if (foreground.get() == a) foreground = new WeakReference<>(null);
                 }
             });
@@ -194,7 +215,7 @@ public class WebHome extends Spider {
         return s;
     }
 
-    // ---------- 内置 WebView 弹窗 ----------
+    // ---------- 内置 WebView 全屏弹窗 ----------
 
     private static final class Overlay extends Dialog {
 
@@ -255,7 +276,7 @@ public class WebHome extends Spider {
             s.setDomStorageEnabled(true);
             s.setDatabaseEnabled(true);
             s.setMediaPlaybackRequiresUserGesture(false);
-            s.setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+            s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
             s.setUseWideViewPort(true);
             s.setLoadWithOverviewMode(true);
             s.setSupportZoom(false);
@@ -266,7 +287,7 @@ public class WebHome extends Spider {
             s.setAllowContentAccess(true);
             s.setAllowFileAccessFromFileURLs(true);
             s.setAllowUniversalAccessFromFileURLs(true);
-            if (Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(android.webkit.RendererPriority.IMPORTANT, true);
+            if (Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
             v.setBackgroundColor(0xFF000000);
             v.setOverScrollMode(android.view.View.OVER_SCROLL_NEVER);
             v.setFocusable(true);

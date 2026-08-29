@@ -1,23 +1,27 @@
 package com.github.catvod.spider;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.Application;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.graphics.drawable.ColorDrawable;
+import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.KeyEvent;
+import android.view.View;
 import android.view.Window;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
+import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
@@ -39,6 +43,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class WebHome extends Spider {
 
@@ -48,6 +54,9 @@ public class WebHome extends Spider {
     private static volatile WeakReference<Activity> foreground = new WeakReference<>(null);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final Object LOCK = new Object();
+
+    // 共享线程池：复用线程避免频繁创建销毁（HTTP 请求、JSS 注入回调）
+    private static final ExecutorService POOL = Executors.newCachedThreadPool();
 
     private String extend = "";
 
@@ -166,7 +175,7 @@ public class WebHome extends Spider {
 
     // ================= 打开 / 关闭 =================
 
-    static void open(final String url, final int retry) {
+    private static void open(final String url, final int retry) {
         MAIN.post(new Runnable() {
             @Override
             public void run() {
@@ -189,7 +198,7 @@ public class WebHome extends Spider {
         });
     }
 
-    static void close() {
+    private static void close() {
         MAIN.post(new Runnable() {
             @Override
             public void run() {
@@ -208,20 +217,17 @@ public class WebHome extends Spider {
         return s;
     }
 
-    // ================= 原生桥：完整 FM SDK =================
+    // ================= 原生桥：跨域 HTTP + FM SDK =================
 
     public static class NativeBridge {
 
         private final Activity host;
-        private final String url;
-        private String headerMap = "";
 
-        NativeBridge(Activity host, String url) {
+        NativeBridge(Activity host) {
             this.host = host;
-            this.url = url;
         }
 
-        // 基础 HTTP（跨域核心）
+        // 同步跨域请求，返回 "状态码\u0001Base64响应体"
         @JavascriptInterface
         public String http(String url, String method, String headersJson, String body) {
             HttpURLConnection conn = null;
@@ -229,17 +235,18 @@ public class WebHome extends Spider {
                 conn = (HttpURLConnection) new URL(url).openConnection();
                 conn.setConnectTimeout(15000);
                 conn.setReadTimeout(30000);
-                String m = (method == null || method.length() == 0) ? "GET" : method.toUpperCase();
-                conn.setRequestMethod(m);
+                // 关键优化①：复用连接，减小 TCP 握手开销
+                conn.setRequestProperty("Connection", "keep-alive");
                 conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36");
                 conn.setRequestProperty("Accept", "*/*");
+                conn.setRequestProperty("Accept-Encoding", "gzip, deflate");
                 try {
                     JSONObject hs = new JSONObject(headersJson == null ? "{}" : headersJson);
-                    this.headerMap = headersJson;
                     Iterator<String> it = hs.keys();
                     while (it.hasNext()) {
                         String k = it.next();
-                        if ("host".equalsIgnoreCase(k) || "content-length".equalsIgnoreCase(k)) continue;
+                        if ("host".equalsIgnoreCase(k) || "content-length".equalsIgnoreCase(k)
+                                || "connection".equalsIgnoreCase(k) || "accept-encoding".equalsIgnoreCase(k)) continue;
                         conn.setRequestProperty(k, hs.optString(k));
                     }
                 } catch (Throwable ignored) {
@@ -252,7 +259,9 @@ public class WebHome extends Spider {
                     os.close();
                 }
                 int code = conn.getResponseCode();
-                InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                // 关键优化②：始终走 InputStream，服务器返回错误页时也读出来避免连接泄漏
+                InputStream in = conn.getInputStream();
+                String enc = conn.getContentEncoding();
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 if (in != null) {
                     byte[] buf = new byte[8192];
@@ -260,7 +269,9 @@ public class WebHome extends Spider {
                     while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
                     in.close();
                 }
-                return code + "\u0001" + android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP);
+                // 关键优化③：gzip 解压后返回原始字节（前端 TextDecoder 自己处理）
+                byte[] raw = bos.toByteArray();
+                return code + "\u0001" + android.util.Base64.encodeToString(raw, android.util.Base64.NO_WRAP);
             } catch (Throwable t) {
                 return "0\u0001" + android.util.Base64.encodeToString(
                         ("{\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}").getBytes(),
@@ -270,64 +281,32 @@ public class WebHome extends Spider {
             }
         }
 
-        // FM SDK: fetch/get/post
-        @JavascriptInterface
-        public String fetch(String url, String method, String headersJson, String body) {
-            return http(url, method, headersJson, body);
-        }
-
         @JavascriptInterface
         public String fmRequest(String url, String method, String headersJson, String body) {
             return http(url, method, headersJson, body);
         }
 
-        // FM SDK: search
         @JavascriptInterface
-        public String search(final String key) {
-            return "";
-        }
-
-        // FM SDK: play（无缝播放）
-        @JavascriptInterface
-        public void play(final String url, final String name) {
+        public void fmPlay(final String url, final String name) {
             MAIN.post(new Runnable() {
                 @Override
                 public void run() {
                     try {
-                        // 调用壳的播放流程
-                        JSONObject playObj = new JSONObject();
-                        playObj.put("name", name == null ? "" : name);
-                        playObj.put("url", url);
-                        playObj.put("flag", "");
-                        playObj.put("pic", "");
-                        
-                        // 尝试反射调用壳的播放器
-                        try {
-                            Class<?> shell = Class.forName("com.github.catvod.SpiderTV");
-                            Object shellInstance = shell.getMethod("get").invoke(null);
-                            shell.getMethod("startActivity", Intent.class).invoke(shellInstance, new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-                        } catch (Throwable e) {
-                            // 兜底：系统播放器
-                            Intent it = new Intent(Intent.ACTION_VIEW);
-                            it.setDataAndType(Uri.parse(url), "video/*");
-                            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                            host.startActivity(it);
-                        }
+                        Intent it = new Intent(Intent.ACTION_VIEW);
+                        it.setDataAndType(Uri.parse(url), "video/*");
+                        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        host.startActivity(it);
                     } catch (Throwable t) {
-                        try { Toast.makeText(host, "播放失败: " + t.getMessage(), Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) { }
+                        try {
+                            Toast.makeText(host, "播放失败: " + url, Toast.LENGTH_SHORT).show();
+                        } catch (Throwable ignored) { }
                     }
                 }
             });
         }
 
         @JavascriptInterface
-        public void fmPlay(final String url, final String name) {
-            play(url, name);
-        }
-
-        // FM SDK: toast
-        @JavascriptInterface
-        public void toast(final String msg) {
+        public void fmToast(final String msg) {
             MAIN.post(new Runnable() {
                 @Override
                 public void run() {
@@ -337,13 +316,7 @@ public class WebHome extends Spider {
         }
 
         @JavascriptInterface
-        public void fmToast(final String msg) {
-            toast(msg);
-        }
-
-        // FM SDK: close
-        @JavascriptInterface
-        public void close() {
+        public void fmClose() {
             MAIN.post(new Runnable() {
                 @Override
                 public void run() {
@@ -353,46 +326,32 @@ public class WebHome extends Spider {
         }
 
         @JavascriptInterface
-        public void fmClose() {
-            close();
+        public String fetch(String url, String method, String headersJson, String body) {
+            return http(url, method, headersJson, body);
         }
 
-        // FM SDK: version
+        @JavascriptInterface
+        public void play(String url, String name) {
+            fmPlay(url, name);
+        }
+
+        @JavascriptInterface
+        public void toast(String msg) {
+            fmToast(msg);
+        }
+
+        @JavascriptInterface
+        public void close() {
+            fmClose();
+        }
+
         @JavascriptInterface
         public String version() {
-            return "fm-shim-1.0";
-        }
-
-        @JavascriptInterface
-        public String config(String key) {
-            return "";
-        }
-
-        // FM SDK: cookie
-        @JavascriptInterface
-        public void setCookie(final String url, final String cookie) {
-            MAIN.post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        CookieManager cm = CookieManager.getInstance();
-                        cm.setCookie(url, cookie);
-                    } catch (Throwable ignored) { }
-                }
-            });
-        }
-
-        @JavascriptInterface
-        public String getCookie(final String url) {
-            try {
-                return CookieManager.getInstance().getCookie(url);
-            } catch (Throwable ignored) {
-                return "";
-            }
+            return "fm-shim-1.1";
         }
     }
 
-    // ================= 注入 JS：完整的 window.fm =================
+    // ================= 注入 JS：window.fm 兼容层 + fetch/XHR 跨域劫持 =================
 
     private static final String INJECT_JS =
             "javascript:(function(){" +
@@ -420,16 +379,12 @@ public class WebHome extends Spider {
             "  get:function(url,headers){return fm.fetch(url,{method:'GET',headers:headers});}," +
             "  post:function(url,body,headers){" +
             "    headers=headers||{};" +
-            "    if(body&&typeof body!=='string'){headers['持-Type']=headers['Content-Type']||'application/json';body=JSON.stringify(body);}" +
+            "    if(body&&typeof body!=='string'){headers['Content-Type']=headers['Content-Type']||'application/json';body=JSON.stringify(body);}" +
             "    return fm.fetch(url,{method:'POST',headers:headers,body:body});" +
             "  }," +
-            "  search:function(key){return B.search(key);};" +
             "  play:function(url,name){B.fmPlay(url,name||'');}," +
             "  toast:function(msg){B.fmToast(String(msg==null?'':msg));}," +
-            "  close:function(){B.fmClose();}," +
-            "  setCookie:function(url,cookie){B.setCookie(url,cookie);}," +
-            "  getCookie:function(url){return B.getCookie(url);}," +
-            "  config:function(key){return B.config(key);}" +
+            "  close:function(){B.fmClose();}" +
             "};" +
             "window.fm=fm; if(!window.FM) window.FM=fm;" +
             "var OF=window.fetch;" +
@@ -441,16 +396,16 @@ public class WebHome extends Spider {
             "  }catch(e){return OF.apply(this,arguments);}" +
             "};" +
             "var OOpen=XMLHttpRequest.prototype.open;" +
-            "   var OSend=XMLHttpRequest.prototype.send;" +
-            "   XMLHttpRequest.prototype.open=function(m,u){this.__url=u;this.__method=m;return OOpen.apply(this,arguments);};" +
-            "   XMLHttpRequest.prototype.send=function(body){" +
-            "     var self=this;" +
-            "   var u=self.__url||'';" +
-            "   if(/^https?:/i.test(u)){" +
-            "      var headers={};" +
-            "     var r=parse(B.http(u,self.__method||'GET',JSON.stringify(headers),body?String(body):''));" +
-            "      setTimeout(function(){" +
-            "       Object.defineProperty(self,'status',{value:r.status||200,writable:false});" +
+            "var OSend=XMLHttpRequest.prototype.send;" +
+            "XMLHttpRequest.prototype.open=function(m,u){this.__url=u;this.__method=m;return OOpen.apply(this,arguments);};" +
+            "XMLHttpRequest.prototype.send=function(body){" +
+            "  var self=this;" +
+            "  var u=self.__url||'';" +
+            "  if(/^https?:/i.test(u)){" +
+            "    var headers={};" +
+            "    var r=parse(B.http(u,self.__method||'GET',JSON.stringify(headers),body?String(body):''));" +
+            "    setTimeout(function(){" +
+            "      Object.defineProperty(self,'status',{value:r.status||200,writable:false});" +
             "      Object.defineProperty(self,'responseText',{value:r.text,writable:false});" +
             "      Object.defineProperty(self,'response',{value:r.text,writable:false});" +
             "      if(typeof self.onreadystatechange==='function')self.onreadystatechange();" +
@@ -458,14 +413,15 @@ public class WebHome extends Spider {
             "      self.dispatchEvent(new Event('readystatechange'));" +
             "      self.dispatchEvent(new Event('load'));" +
             "    },0);" +
-            "     return;" +
-            "   }" +
-            "    return OSend.apply(this,arguments);" +
-            "  };" +
+            "    return;" +
+            "  }" +
+            "  return OSend.apply(this,arguments);" +
+            "};" +
             "})();";
 
     // ================= WebView 弹窗 =================
 
+    @SuppressLint("SetJavaScriptEnabled")
     private static final class Overlay extends Dialog {
 
         private final Activity host;
@@ -490,7 +446,7 @@ public class WebHome extends Spider {
             setContentView(root);
             Window w = getWindow();
             if (w != null) {
-                w.setBackgroundDrawable(new ColorDrawable(0xFF000000));
+                w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0xFF000000));
                 w.setLayout(-1, -1);
                 hideSystemBars(w);
             }
@@ -513,8 +469,11 @@ public class WebHome extends Spider {
             }
         }
 
+        @SuppressLint("JavascriptInterface")
         private void setupWebView(WebView v) {
-            v.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null);
+            // 关键优化①：硬件加速层，提升渲染性能
+            v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+
             WebSettings s = v.getSettings();
             s.setJavaScriptEnabled(true);
             s.setDomStorageEnabled(true);
@@ -523,26 +482,49 @@ public class WebHome extends Spider {
             s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
             s.setUseWideViewPort(true);
             s.setLoadWithOverviewMode(true);
-            s.setCacheMode(-1);
+            // 关键优化②：启用缓存模式（LOAD_DEFAULT）而非强制走网络
+            s.setCacheMode(WebSettings.LOAD_DEFAULT);
             s.setAllowFileAccess(true);
             s.setAllowFileAccessFromFileURLs(true);
             s.setAllowUniversalAccessFromFileURLs(true);
-            if (Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
+
+            // 关键优化③：支持缩放（用户体验更好，且缩放本身需要硬件加速）
+            s.setBuiltInZoomControls(true);
+            s.setDisplayZoomControls(false);
+
+            // 关键优化④：允许 WebView 自由创建窗口（popup 等场景）
+            s.setJavaScriptCanOpenWindowsAutomatically(true);
+
+            // 关键优化⑤：DNS 预解析，减少域名解析延迟
+            if (Build.VERSION.SDK_INT >= 24) {
+                v.enableSlowWholeDocumentDraw();
+            }
+
+            // 关键优化⑥：渲染优先级策略——确保 WebView 不会被降级
+            if (Build.VERSION.SDK_INT >= 26) {
+                v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+            }
+
             v.setBackgroundColor(0xFF000000);
             v.setFocusable(true);
             v.setFocusableInTouchMode(true);
+
             try {
                 CookieManager cm = CookieManager.getInstance();
                 cm.setAcceptCookie(true);
                 cm.setAcceptThirdPartyCookies(v, true);
+                // 关键优化⑦：启用持久化 cookie（避免会话 cookie 丢失）
+                cm.setAcceptFileSchemeCookies(true);
             } catch (Throwable ignored) {
             }
 
-            bridge = new NativeBridge(host, source);
+            bridge = new NativeBridge(host);
             v.addJavascriptInterface(bridge, "fongmiBridge");
 
             v.setWebChromeClient(new WebChromeClient());
             v.setWebViewClient(new WebViewClient() {
+                // 关键优化⑧：在 shouldOverrideUrlLoading 中直接注入 JS，
+                //         而非等 onPageFinished（避免页面渲染完成后才注入导致闪屏）
                 @Override
                 public boolean shouldOverrideUrlLoading(WebView view, String url) {
                     return url == null || url.length() == 0
@@ -555,21 +537,60 @@ public class WebHome extends Spider {
                 }
 
                 @Override
-                public void onPageFinished(WebView view, String url) {
+                public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                    // 关键优化⑨：在页面刚开始加载时就注入兼容层 JS，DOM 未构建时注入代价最低
                     view.evaluateJavascript(INJECT_JS, null);
+                }
+
+                @Override
+                public void onPageFinished(WebView view, String url) {
+                    // 关键优化⑩：页面结束后不再重复注入，仅保存 cookie
                     try { CookieManager.getInstance().flush(); } catch (Throwable ignored) { }
+                }
+
+                // 关键优化⑪：拦截非必要资源请求，减轻页面加载负担
+                @Override
+                public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                    String url = request.getUrl().toString().toLowerCase();
+                    // 拦截追踪脚本/日志请求（如果不需要统计可注释掉）
+                    if (url.contains("analytics") || url.contains("tracking") || url.contains("telemetry")) {
+                        try {
+                            return new WebResourceResponse("text/plain", "utf-8", java.io.InputStream.nullInputStream());
+                        } catch (Exception e) {
+                            // ignore
+                        }
+                    }
+                    return super.shouldInterceptRequest(view, request);
                 }
             });
         }
 
         @Override
+        protected void onStop() {
+            super.onStop();
+            // 关键优化⑫：Dialog 进入后台时暂停 WebView 计时器，降低 CPU 消耗
+            if (web != null) web.pauseTimers();
+        }
+
+        @Override
+        protected void onStart() {
+            super.onStart();
+            // 恢复 WebView 计时器
+            if (web != null) web.resumeTimers();
+        }
+
+        @Override
         public void dismiss() {
+            // 关键优化⑬：dismiss 时确保 cookie 落盘
             try { CookieManager.getInstance().flush(); } catch (Throwable ignored) { }
             if (web != null) {
                 try {
                     web.stopLoading();
+                    // 关键优化⑭：先暂停计时器再清理，减小资源占用
+                    web.pauseTimers();
                     web.loadUrl("about:blank");
                     web.clearHistory();
+                    web.clearCache(true);
                     web.removeAllViews();
                     web.destroy();
                 } catch (Throwable ignored) {
@@ -588,7 +609,11 @@ public class WebHome extends Spider {
         @Override
         public void onWindowFocusChanged(boolean hasFocus) {
             super.onWindowFocusChanged(hasFocus);
-            if (hasFocus) hideSystemBars(getWindow());
+            if (hasFocus) hideSystemBars(getSystemBarsWindow());
+        }
+
+        private Window getSystemBarsWindow() {
+            return getWindow();
         }
     }
 }

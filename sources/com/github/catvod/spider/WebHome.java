@@ -29,8 +29,6 @@ public class WebHome extends Spider {
                 siteUrl = new JSONObject(ext).optString("site", siteUrl);
             } else if (ext.startsWith("http")) {
                 siteUrl = ext;
-            } else if (ext.endsWith(".html") || ext.endsWith(".htm")) {
-                siteUrl = ext; // 本地 html 路径，showOverlay 时转 file://
             }
         } catch (Throwable ignored) {
         }
@@ -54,6 +52,14 @@ public class WebHome extends Spider {
                 item.put("vod_remarks", "网页");
                 list.put(item);
             }
+
+            JSONObject entry = new JSONObject();
+            entry.put("vod_id", OPEN_ID);
+            entry.put("vod_name", "打开网页");
+            entry.put("vod_pic", "");
+            entry.put("vod_remarks", "点击进入");
+            list.put(entry);
+
             root.put("list", list);
             return root.toString();
         } catch (Throwable e) {
@@ -63,23 +69,13 @@ public class WebHome extends Spider {
 
     @Override
     public String homeVideoContent() {
-        return "{\"vod_id\":\"" + OPEN_ID + "\",\"vod_name\":\"打开网页\",\"vod_pic\":\"\",\"vod_remarks\":\"点击进入\"}";
+        // 返回空，避免壳反复追加导致条目重复；入口条目放在 homeContent 的 list 里
+        return "";
     }
 
     @Override
     public String categoryContent(String tid, String pg, boolean filter, HashMap<String, String> extend) {
-        try {
-            JSONObject item = new JSONObject();
-            item.put("vod_id", OPEN_ID);
-            item.put("vod_name", "打开网页（进入后由站点提供内容）");
-            item.put("vod_pic", "");
-            item.put("vod_remarks", "点击进入");
-            JSONObject root = new JSONObject();
-            root.put("list", new JSONArray().put(item));
-            return root.toString();
-        } catch (Throwable e) {
-            return "{\"list\":[]}";
-        }
+        return homeContent(false);
     }
 
     @Override
@@ -100,6 +96,11 @@ public class WebHome extends Spider {
 
     @Override
     public String playerContent(String flag, String id, List<String> vipFlags) {
+        // 兜底：如果壳把入口条目当成播放处理，播放前先把网页弹出来
+        if (id != null && (OPEN_ID.equals(id) || OPEN_ID.equals(flag))) {
+            showOverlay();
+            return "{\"parse\":0,\"playUrl\":\"\",\"url\":\"\",\"jx\":\"\"}";
+        }
         if (id != null && (id.startsWith("http://") || id.startsWith("https://")
                 || (!id.isEmpty() && id.trim().charAt(0) == '{'))) {
             try {
@@ -136,7 +137,14 @@ public class WebHome extends Spider {
                 url = "file://" + (url.startsWith("/") ? url : "/" + url);
             }
         }
-        Overlay.show(act, url);
+        final Activity activity = act;
+        final String openUrl = url;
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Overlay.show(activity, openUrl);
+            }
+        });
     }
 
     private static Activity currentActivity() {

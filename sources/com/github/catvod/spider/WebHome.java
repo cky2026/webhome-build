@@ -25,6 +25,8 @@ import android.widget.Toast;
 
 import com.github.catvod.crawler.Spider;
 
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
@@ -216,7 +218,7 @@ public class WebHome extends Spider {
             this.host = host;
         }
 
-        // ---- 同步跨域请求，返回 "状态码\x01Base64响应体" ----
+        // 同步跨域请求，返回 "状态码\u0001Base64响应体"
         @JavascriptInterface
         public String http(String url, String method, String headersJson, String body) {
             HttpURLConnection conn = null;
@@ -264,13 +266,11 @@ public class WebHome extends Spider {
             }
         }
 
-        // ---- FM SDK: window.fm.get / fm.post / fm.fetch ----
         @JavascriptInterface
         public String fmRequest(String url, String method, String headersJson, String body) {
             return http(url, method, headersJson, body);
         }
 
-        // ---- FM SDK: window.fm.play(url, name) ----
         @JavascriptInterface
         public void fmPlay(final String url, final String name) {
             MAIN.post(new Runnable() {
@@ -290,7 +290,6 @@ public class WebHome extends Spider {
             });
         }
 
-        // ---- FM SDK: window.fm.toast(msg) ----
         @JavascriptInterface
         public void fmToast(final String msg) {
             MAIN.post(new Runnable() {
@@ -301,7 +300,6 @@ public class WebHome extends Spider {
             });
         }
 
-        // ---- FM SDK: window.fm.close() ----
         @JavascriptInterface
         public void fmClose() {
             MAIN.post(new Runnable() {
@@ -312,7 +310,6 @@ public class WebHome extends Spider {
             });
         }
 
-        // 兼容原版 fongmiBridge 命名
         @JavascriptInterface
         public String fetch(String url, String method, String headersJson, String body) {
             return http(url, method, headersJson, body);
@@ -345,8 +342,6 @@ public class WebHome extends Spider {
             "javascript:(function(){" +
             "if(window.__fmShim) return; window.__fmShim=true;" +
             "var B=window.fongmiBridge; if(!B) return;" +
-
-            // 解析 http() 返回："code\u0001base64"
             "function parse(raw){" +
             "  var i=raw.indexOf('\\u0001');" +
             "  var code=parseInt(raw.substring(0,i))||0;" +
@@ -356,8 +351,6 @@ public class WebHome extends Spider {
             "  var text=null;try{text=new TextDecoder('utf-8').decode(bytes);}catch(e){text=bin;}" +
             "  return {status:code,bytes:bytes,text:text,json:function(){try{return JSON.parse(text)}catch(e){return null}}};" +
             "}" +
-
-            // window.fm —— FM SDK 兼容层
             "var fm={" +
             "  version:function(){return B.version();}," +
             "  fetch:function(url,opt){" +
@@ -379,8 +372,6 @@ public class WebHome extends Spider {
             "  close:function(){B.fmClose();}" +
             "};" +
             "window.fm=fm; if(!window.FM) window.FM=fm;" +
-
-            // 跨域劫持 fetch
             "var OF=window.fetch;" +
             "window.fetch=function(input,init){" +
             "  try{" +
@@ -389,8 +380,6 @@ public class WebHome extends Spider {
             "    return fm.fetch(url,init||{}).then(function(r){return new Response(r.text,{status:r.status||200});});" +
             "  }catch(e){return OF.apply(this,arguments);}" +
             "};" +
-
-            // 跨域劫持 XMLHttpRequest
             "var OOpen=XMLHttpRequest.prototype.open;" +
             "var OSend=XMLHttpRequest.prototype.send;" +
             "XMLHttpRequest.prototype.open=function(m,u){this.__url=u;this.__method=m;return OOpen.apply(this,arguments);};" +
@@ -399,7 +388,6 @@ public class WebHome extends Spider {
             "  var u=self.__url||'';" +
             "  if(/^https?:/i.test(u)){" +
             "    var headers={};" +
-            "    try{headers['Content-Type']=self.getRequestHeader?(''+self.getRequestHeader('Content-Type')||''):'';}catch(e){}" +
             "    var r=parse(B.http(u,self.__method||'GET',JSON.stringify(headers),body?String(body):''));" +
             "    setTimeout(function(){" +
             "      Object.defineProperty(self,'status',{value:r.status||200,writable:false});" +
